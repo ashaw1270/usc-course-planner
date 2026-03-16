@@ -23,7 +23,6 @@ class CourseRequirement(BaseModel):
     title: str | None = None
     units: float | None = None
     required: bool = True
-    repeatable: bool | None = None
     notes: list[str] = Field(default_factory=list)
 
 
