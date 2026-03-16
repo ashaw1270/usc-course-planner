@@ -133,25 +133,126 @@ def _parse_block(block_el, block_title: str, min_units: int | None, max_units: i
             # When we hit a new heading at same level, we could break; for now keep collecting
             continue
         if elem.name == "ul":
-            # Find parent acalog-core to avoid double-parsing nested uls
+            # Decide whether this <ul> is a simple list or an \"or\"/\"and\" choice group.
+            # We treat \"or\" as indicating alternatives and \"and\" as courses that belong
+            # to the same sequence within a choice.
+            ul_items: list = []
+
+            # First, collect all course <li> elements in order and detect connectors.
+            course_lis: list[tuple[int, any]] = []  # (index, li)
+            for idx, li in enumerate(elem.find_all("li", class_="acalog-course")):
+                course_lis.append((idx, li))
+
+            connectors: dict[int, str] = {}
+
+            # Detect trailing \"and\"/\"or\" in course span text.
+            for idx, li in course_lis:
+                span = li.find("span")
+                tail = span.get_text(" ", strip=True).lower() if span else li.get_text(" ", strip=True).lower()
+                m = re.search(r"(and|or)\s*$", tail)
+                if m:
+                    connectors[idx] = m.group(1)
+
+            # Detect standalone acalog-adhoc \"or\"/\"and\" between courses.
+            adhoc_lis = elem.find_all("li", class_=re.compile("acalog-adhoc"))
+            if adhoc_lis:
+                # Map course <li> elements in DOM order so we can find the previous one.
+                all_lis = [li for li in elem.find_all("li")]
+                index_by_li = {li: i for i, li in enumerate(all_lis)}
+                course_order = [index_by_li[li] for _, li in course_lis]
+                for adhoc in adhoc_lis:
+                    text = adhoc.get_text(strip=True).lower()
+                    if text not in ("and", "or"):
+                        continue
+                    pos = index_by_li.get(adhoc)
+                    if pos is None:
+                        continue
+                    # Find the last course before this adhoc li.
+                    prev_course_idx = None
+                    for idx_in_ul, order_pos in reversed(list(enumerate(course_order))):
+                        if order_pos < pos:
+                            prev_course_idx = idx_in_ul
+                            break
+                    if prev_course_idx is not None:
+                        connectors[prev_course_idx] = text
+
+            # Build list of CourseRequirement objects in order, plus connectors.
             courses: list[CourseRequirement] = []
-            for li in elem.find_all("li", class_="acalog-course"):
+            course_connectors: list[str | None] = []
+            for idx, li in course_lis:
                 cr = _parse_course_li(li)
-                if cr:
-                    courses.append(cr)
-            if courses:
-                # Check for "or" between courses (alternatives)
-                if len(courses) <= 1:
-                    items.extend(courses)
-                else:
-                    # Group as single list; optional: detect "or" and make CourseGroupRequirement
-                    items.extend(courses)
-            # Also check for acalog-adhoc "or" / "and"
-            for li in elem.find_all("li", class_=re.compile("acalog-adhoc")):
-                t = li.get_text(strip=True)
-                if t in ("or", "and") and items and isinstance(items[-1], CourseRequirement):
-                    # Mark previous as optional alternative; we keep as list of courses
-                    pass
+                if not cr:
+                    continue
+                courses.append(cr)
+                course_connectors.append(connectors.get(idx))
+
+            if not courses:
+                continue
+
+            # Partition into local segments so that we can mix required courses
+            # with local choice groups in a single <ul>.
+            segments: list[tuple[list[CourseRequirement], list[str | None], bool]] = []
+            seg_courses: list[CourseRequirement] = []
+            seg_conns: list[str | None] = []
+            seg_has_or = False
+
+            for cr, conn in zip(courses, course_connectors):
+                seg_courses.append(cr)
+                seg_conns.append(conn)
+                if conn == "or":
+                    seg_has_or = True
+                if conn is None:
+                    # End of this local segment.
+                    segments.append((seg_courses, seg_conns, seg_has_or))
+                    seg_courses = []
+                    seg_conns = []
+                    seg_has_or = False
+
+            # If the last course had a connector != None, close the trailing segment.
+            if seg_courses:
+                segments.append((seg_courses, seg_conns, seg_has_or))
+
+            # Turn segments into either flat required courses or structured choice groups.
+            for seg_courses, seg_conns, seg_has_or in segments:
+                if not seg_has_or:
+                    # No \"or\" in this segment: treat all courses here as required.
+                    ul_items.extend(seg_courses)
+                    continue
+
+                # Segment contains at least one \"or\": build a CourseGroupRequirement.
+                sequences: list[list[CourseRequirement]] = []
+                current_seq: list[CourseRequirement] = []
+                for cr, conn in zip(seg_courses, seg_conns):
+                    current_seq.append(cr)
+                    if conn == "and":
+                        # same option sequence continues
+                        continue
+                    # conn is \"or\" or None => end current sequence
+                    sequences.append(current_seq)
+                    current_seq = []
+                if current_seq:
+                    sequences.append(current_seq)
+
+                group_label = block_title
+                # If we previously captured a \"one of the following\" note, use that.
+                for n in notes:
+                    if "one of the following" in n.lower():
+                        group_label = n
+                        break
+
+                group = CourseGroupRequirement(
+                    group_label=group_label,
+                    min_courses=None,
+                    max_courses=None,
+                    min_units=None,
+                    max_units=None,
+                    courses=[],
+                    options=sequences,
+                    notes=[],
+                )
+                ul_items.append(group)
+
+            items.extend(ul_items)
 
     return RequirementBlock(
         id=block_id,

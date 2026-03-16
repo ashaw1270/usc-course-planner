@@ -33,11 +33,16 @@ class CourseGroupRequirement(BaseModel):
 
     type: Literal["course_group"] = "course_group"
     group_label: str
+    # For simple groups expressed as a flat set of alternatives
     min_courses: int | None = None
     max_courses: int | None = None
     min_units: int | None = None
     max_units: int | None = None
     courses: list[CourseRequirement] = Field(default_factory=list)
+    # For structured choices like (A and B) or (C and D), where each
+    # inner list represents a sequence of courses taken together.
+    # Exactly one sequence is usually selected when an \"or\" appears.
+    options: list[list[CourseRequirement]] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 

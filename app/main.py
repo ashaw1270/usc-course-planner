@@ -100,7 +100,12 @@ async def get_program_summary(
                 else:
                     elective_count += 1
             elif kind == "course_group":
-                elective_count += len(getattr(item, "courses", []))
+                # Count all underlying courses in options (each option is a sequence)
+                options = getattr(item, "options", []) or []
+                if options:
+                    elective_count += sum(len(seq) for seq in options)
+                else:
+                    elective_count += len(getattr(item, "courses", []))
 
     return {
         "title": program.title,
