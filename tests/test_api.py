@@ -92,7 +92,7 @@ async def test_get_program_summary(monkeypatch, sample_html):
 
 
 @pytest.mark.asyncio
-async def test_get_ge_by_catalog_year(monkeypatch, sample_ge_html):
+async def test_get_ge_by_id_payload(monkeypatch, sample_ge_html):
     async def mock_fetch_ge(catoid: int, poid: int):
         return parse_general_education_html(sample_ge_html, catoid, poid)
 
@@ -103,31 +103,14 @@ async def test_get_ge_by_catalog_year(monkeypatch, sample_ge_html):
         transport=ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        r = await client.get("/ge/2025-2026?force_refresh=true")
+        r = await client.get("/ge/by-id?catoid=21&poid=29462&force_refresh=true")
     assert r.status_code == 200
     data = r.json()
     assert data["catalog_year"] == "2025-2026"
     assert len(data["categories"]) == 8
-
-
-@pytest.mark.asyncio
-async def test_get_ge_category(monkeypatch, sample_ge_html):
-    async def mock_fetch_ge(catoid: int, poid: int):
-        return parse_general_education_html(sample_ge_html, catoid, poid)
-
-    import app.main as main_module
-    monkeypatch.setattr(main_module, "fetch_general_education_catalog", mock_fetch_ge)
-
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        r = await client.get("/ge/2025-2026/categories/GE-G?force_refresh=true")
-    assert r.status_code == 200
-    data = r.json()
-    assert data["code"] == "GE-G"
-    assert data["required_count"] == 1
-    courses = {c["course_id"]: c["specific_students_only"] for c in data["courses"]}
+    ge_g = next(c for c in data["categories"] if c["code"] == "GE-G")
+    assert ge_g["required_count"] == 1
+    courses = {c["course_id"]: c["specific_students_only"] for c in ge_g["courses"]}
     assert courses["PHIL 174gw"] is False
     assert courses["CORE 104gw"] is True
 

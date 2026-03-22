@@ -23,6 +23,7 @@ Then open http://127.0.0.1:8000/docs for the interactive API docs.
 - `GET /programs/by-id?catoid=21&poid=29994` — Get program by catalogue and program ID
 - `GET /programs/{slug}` — Get program by slug (e.g. `csci-bs`)
 - `GET /programs/{slug}/summary` — Summary (total units, course counts)
+- `GET /ge/by-id?catoid=21&poid=29462` — General Education course listings (by catalogue + GE program id)
 
 Query params: `force_refresh=true` to bypass cache.
 
