@@ -1,7 +1,7 @@
 """Unit tests for USC catalogue scraper."""
 import pytest
 
-from app.scraper import parse_program_html
+from app.scraper import parse_general_education_html, parse_program_html
 
 
 FIXTURE_DIR = __file__.replace("test_scraper.py", "fixtures")
@@ -92,3 +92,66 @@ def test_level_and_type_inference():
     program = parse_program_html(html, catoid=21, poid=29994)
     assert program.level == "undergraduate"
     assert program.type == "major"
+
+
+def test_parse_general_education_categories_and_required_counts():
+    html = _load_fixture("sample_ge_program.html")
+    ge = parse_general_education_html(html, catoid=21, poid=29462)
+
+    assert ge.catalog_year == "2025-2026"
+    assert len(ge.categories) == 8
+
+    by_code = {c.code: c for c in ge.categories}
+    assert by_code["GE-A"].required_count == 1
+    assert by_code["GE-B"].required_count == 2
+    assert by_code["GE-C"].required_count == 2
+    assert by_code["GE-D"].required_count == 1
+    assert by_code["GE-E"].required_count == 1
+    assert by_code["GE-F"].required_count == 1
+    assert by_code["GE-G"].required_count == 1
+    assert by_code["GE-H"].required_count == 1
+
+
+def test_parse_general_education_overlap_index_and_policy():
+    html = _load_fixture("sample_ge_program.html")
+    ge = parse_general_education_html(html, catoid=21, poid=29462)
+
+    assert "PHIL 174gw" in ge.course_to_categories
+    assert ge.course_to_categories["PHIL 174gw"] == ["GE-B", "GE-G"]
+    assert ge.course_to_categories["HIST 211gp"] == ["GE-C", "GE-H"]
+
+    rules = {(r.source_category, r.target_category, r.max_shared_courses) for r in ge.overlap_policy.allowed_cross_count_rules}
+    assert ("GE-B", "GE-H", 1) in rules
+    assert ("GE-C", "GE-G", 1) in rules
+    assert ge.overlap_policy.no_other_double_counting is True
+
+
+def test_parse_general_education_specific_students_flag():
+    html = _load_fixture("sample_ge_program.html")
+    ge = parse_general_education_html(html, catoid=21, poid=29462)
+
+    by_code = {c.code: c for c in ge.categories}
+    g_courses = {c.course_id: c.specific_students_only for c in by_code["GE-G"].courses}
+    assert g_courses["PHIL 174gw"] is False
+    assert g_courses["CORE 104gw"] is True
+
+
+def test_parse_general_education_us_catalog_h5_then_h4_course_list():
+    """USC GE pages use h5 (GE-A.) for prose then h4 (GE-A:) for the real course <ul>."""
+    html = """<!doctype html><html><body>
+    <span class="acalog_catalog_name">USC Catalogue 2025-2026</span>
+    <h5>GE-A. The Arts</h5><p>Intro text only.</p>
+    <h5>GE-B. Humanistic Inquiry</h5><p>More intro.</p>
+    <h4>GE-A: The Arts</h4><ul>
+      <li class="acalog-course"><span><a href="#">CTCS 190g Introduction to Cinema</a> Units: 4</span></li>
+      <li class="acalog-course"><span><a href="#">AHIS 120gp Foundations of Western Art</a> Units: 4</span></li>
+    </ul>
+    <h4>GE-B: Humanistic Inquiry</h4><ul>
+      <li class="acalog-course"><span><a href="#">ENGL 170g The Monster and the Detective</a> Units: 4</span></li>
+    </ul>
+    </body></html>"""
+    ge = parse_general_education_html(html, catoid=21, poid=29462)
+    by_code = {c.code: c for c in ge.categories}
+    assert [c.course_id for c in by_code["GE-A"].courses] == ["CTCS 190g", "AHIS 120gp"]
+    assert all(not c.specific_students_only for c in by_code["GE-A"].courses)
+    assert [c.course_id for c in by_code["GE-B"].courses] == ["ENGL 170g"]

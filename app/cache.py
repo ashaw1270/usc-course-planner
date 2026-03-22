@@ -3,7 +3,7 @@ import time
 from typing import Any
 
 from app.config import settings
-from app.models import Program
+from app.models import GeneralEducationCatalog, Program
 
 
 class ProgramCache:
@@ -31,8 +31,34 @@ class ProgramCache:
         self._store[(catoid, poid)] = (program, time.monotonic())
 
 
+class GeneralEducationCatalogCache:
+    """Simple TTL cache keyed by (catoid, poid)."""
+
+    def __init__(self, ttl_seconds: int | None = None):
+        self._ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_seconds
+        self._store: dict[tuple[int, int], tuple[GeneralEducationCatalog, float]] = {}
+
+    def get(self, catoid: int, poid: int, force_refresh: bool = False) -> GeneralEducationCatalog | None:
+        """Return cached GE catalog if present and not expired. None otherwise."""
+        if force_refresh:
+            return None
+        key = (catoid, poid)
+        if key not in self._store:
+            return None
+        ge_catalog, fetched_at = self._store[key]
+        if time.monotonic() - fetched_at > self._ttl:
+            del self._store[key]
+            return None
+        return ge_catalog
+
+    def set(self, catoid: int, poid: int, ge_catalog: GeneralEducationCatalog) -> None:
+        """Store GE catalog in cache."""
+        self._store[(catoid, poid)] = (ge_catalog, time.monotonic())
+
+
 # Module-level singleton
 _cache: ProgramCache | None = None
+_ge_cache: GeneralEducationCatalogCache | None = None
 
 
 def get_cache() -> ProgramCache:
@@ -40,3 +66,10 @@ def get_cache() -> ProgramCache:
     if _cache is None:
         _cache = ProgramCache()
     return _cache
+
+
+def get_ge_cache() -> GeneralEducationCatalogCache:
+    global _ge_cache
+    if _ge_cache is None:
+        _ge_cache = GeneralEducationCatalogCache()
+    return _ge_cache

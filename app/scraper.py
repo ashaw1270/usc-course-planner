@@ -18,12 +18,31 @@ from app.models import (
     Pool,
     Program,
     ProgramId,
+    GeneralEducationCatalog,
+    GeCategoryRequirement,
+    GeListedCourse,
+    GeCrossCountRule,
+    GeOverlapPolicy,
     RequirementBlock,
     RequirementConfig,
     RequirementNode,
     SelectNode,
     TextNode,
 )
+
+_GE_REQUIRED_COUNTS: dict[str, int] = {
+    "GE-A": 1,
+    "GE-B": 2,
+    "GE-C": 2,
+    "GE-D": 1,
+    "GE-E": 1,
+    "GE-F": 1,
+    "GE-G": 1,
+    "GE-H": 1,
+}
+
+# Narrative blocks use "GE-A. Title"; course list blocks use "GE-A: Title" (often h4).
+_GE_HEADING_RE = re.compile(r"^(GE-[A-H])[.:]\s*(.+?)\s*$", re.I)
 
 
 def _block_kind_from_title(title: str) -> Literal["core", "elective", "ge", "pre_major", "supporting", "other"]:
@@ -699,3 +718,162 @@ async def fetch_program(catoid: int, poid: int, slug: str | None = None) -> Prog
         response = await client.get(url, params=params)
         response.raise_for_status()
     return parse_program_html(response.text, catoid, poid, slug)
+
+
+def _extract_catalog_year(soup: BeautifulSoup) -> str:
+    catalog_el = soup.find("span", class_="acalog_catalog_name")
+    if not catalog_el:
+        return ""
+    raw = catalog_el.get_text(strip=True)
+    m = re.search(r"(\d{4}-\d{4})", raw)
+    return m.group(1) if m else raw
+
+
+def _extract_ge_courses_for_heading(heading) -> tuple[list[tuple[str, bool]], list[str]]:
+    """Extract GE courses under this heading; bool is True under 'Courses for Specific Students'."""
+    warnings: list[str] = []
+    rows: list[tuple[str, bool]] = []
+    specific_students_only = False
+
+    for el in heading.next_elements:
+        if el is heading:
+            continue
+        name = getattr(el, "name", None)
+        # Next GE category (narrative uses h5; lists use h4 — stop at either).
+        if name in {"h4", "h5"}:
+            t = el.get_text(" ", strip=True)
+            if _GE_HEADING_RE.match(t):
+                break
+        if name in {"h4", "h5", "h6"}:
+            text = el.get_text(" ", strip=True).lower()
+            if "courses for specific students" in text:
+                specific_students_only = True
+                continue
+        if name != "li":
+            continue
+        classes = el.get("class") or []
+        if "acalog-course" not in classes:
+            continue
+        course = _parse_course_from_li(el)
+        if not course:
+            warnings.append(f"Could not parse GE course row: {el.get_text(' ', strip=True)[:80]}")
+            continue
+        rows.append((course.course_id, specific_students_only))
+
+    # Dedupe by course_id; OR specific_students_only if the same id appears twice.
+    order: list[str] = []
+    flags: dict[str, bool] = {}
+    for cid, spec in rows:
+        if cid not in flags:
+            flags[cid] = spec
+            order.append(cid)
+        else:
+            flags[cid] = flags[cid] or spec
+    deduped = [(cid, flags[cid]) for cid in order]
+    return deduped, warnings
+
+
+def parse_general_education_html(html: str, catoid: int, poid: int) -> GeneralEducationCatalog:
+    """Parse USC General Education page into normalized GE categories and cross-count metadata."""
+    soup = BeautifulSoup(html, "lxml")
+    catalog_year = _extract_catalog_year(soup)
+    source_url = f"{settings.catalogue_base_url.rstrip('/')}/preview_program.php?catoid={catoid}&poid={poid}"
+
+    warnings: list[str] = []
+    # USC repeats each GE as h5 (prose) and h4 (course lists). Merge by code.
+    merged: dict[str, tuple[str, dict[str, bool], list[str]]] = {}
+
+    for heading in soup.find_all(["h4", "h5"]):
+        text = heading.get_text(" ", strip=True)
+        m = _GE_HEADING_RE.match(text)
+        if not m:
+            continue
+        code = m.group(1).upper()
+        label = m.group(2).strip()
+
+        extracted, parse_warnings = _extract_ge_courses_for_heading(heading)
+        warnings.extend(parse_warnings)
+
+        if code not in merged:
+            merged[code] = (label, {}, [])
+        cur_label, cur_flags, cur_order = merged[code]
+        # Prefer label from the colon form (course-list headings) when present.
+        if ":" in text:
+            cur_label = label
+        for cid, spec in extracted:
+            if cid not in cur_flags:
+                cur_flags[cid] = spec
+                cur_order.append(cid)
+            else:
+                cur_flags[cid] = cur_flags[cid] or spec
+        merged[code] = (cur_label, cur_flags, cur_order)
+
+    categories: list[GeCategoryRequirement] = []
+    for code in sorted(merged.keys()):
+        label, cur_flags, cur_order = merged[code]
+        courses = [
+            GeListedCourse(course_id=cid, specific_students_only=cur_flags[cid]) for cid in cur_order
+        ]
+        categories.append(
+            GeCategoryRequirement(
+                code=code,  # type: ignore[arg-type]
+                label=label,
+                required_count=_GE_REQUIRED_COUNTS[code],
+                courses=courses,
+            )
+        )
+
+    found = set(merged.keys())
+    for code in _GE_REQUIRED_COUNTS:
+        if code not in found:
+            warnings.append(f"Missing GE category heading: {code}")
+
+    categories.sort(key=lambda c: c.code)
+    course_to_categories: dict[str, list[str]] = {}
+    for cat in categories:
+        if not cat.courses:
+            warnings.append(f"Category {cat.code} has no parsed courses.")
+        for entry in cat.courses:
+            course_to_categories.setdefault(entry.course_id, []).append(cat.code)
+    for cid in course_to_categories:
+        course_to_categories[cid] = sorted(course_to_categories[cid])
+
+    overlap_policy = GeOverlapPolicy(
+        allowed_cross_count_rules=[
+            GeCrossCountRule(
+                source_category="GE-B",
+                target_category="GE-H",
+                max_shared_courses=1,
+                note="One GE-B course may also satisfy GE-H when dual-listed.",
+            ),
+            GeCrossCountRule(
+                source_category="GE-C",
+                target_category="GE-G",
+                max_shared_courses=1,
+                note="One GE-C course may also satisfy GE-G when dual-listed.",
+            ),
+        ],
+        no_other_double_counting=True,
+        policy_note="Global Perspectives courses may double-count with Core Literacies only as approved by USC policy.",
+    )
+
+    return GeneralEducationCatalog(
+        catoid=catoid,
+        poid=poid,
+        catalog_year=catalog_year,
+        source_url=source_url,
+        categories=categories,
+        course_to_categories=course_to_categories,
+        overlap_policy=overlap_policy,
+        warnings=warnings,
+    )
+
+
+async def fetch_general_education_catalog(catoid: int, poid: int) -> GeneralEducationCatalog:
+    """Fetch and parse USC GE program page by ids."""
+    url = f"{settings.catalogue_base_url.rstrip('/')}/preview_program.php"
+    params = {"catoid": catoid, "poid": poid}
+    async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
+        response = await client.get(url, params=params)
+        response.raise_for_status()
+    return parse_general_education_html(response.text, catoid, poid)

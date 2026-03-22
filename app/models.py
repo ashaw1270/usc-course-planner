@@ -127,3 +127,49 @@ class Program(BaseModel):
     notes: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     config: RequirementConfig = Field(default_factory=RequirementConfig)
+
+
+class GeListedCourse(BaseModel):
+    """Single course line under a GE category listing."""
+
+    course_id: str
+    specific_students_only: bool = False
+
+
+class GeCategoryRequirement(BaseModel):
+    """GE category requirement and eligible course list."""
+
+    code: Literal["GE-A", "GE-B", "GE-C", "GE-D", "GE-E", "GE-F", "GE-G", "GE-H"]
+    label: str
+    required_count: int
+    courses: list[GeListedCourse] = Field(default_factory=list)
+
+
+class GeCrossCountRule(BaseModel):
+    """Allowed cross-counting relation between GE categories."""
+
+    source_category: Literal["GE-A", "GE-B", "GE-C", "GE-D", "GE-E", "GE-F", "GE-G", "GE-H"]
+    target_category: Literal["GE-A", "GE-B", "GE-C", "GE-D", "GE-E", "GE-F", "GE-G", "GE-H"]
+    max_shared_courses: int = 1
+    note: str | None = None
+
+
+class GeOverlapPolicy(BaseModel):
+    """Cross-counting rules and explanatory policy metadata."""
+
+    allowed_cross_count_rules: list[GeCrossCountRule] = Field(default_factory=list)
+    no_other_double_counting: bool = True
+    policy_note: str | None = None
+
+
+class GeneralEducationCatalog(BaseModel):
+    """Canonical GE requirement listing for a single USC catalog year."""
+
+    catoid: int
+    poid: int
+    catalog_year: str
+    source_url: str
+    categories: list[GeCategoryRequirement] = Field(default_factory=list)
+    course_to_categories: dict[str, list[str]] = Field(default_factory=dict)
+    overlap_policy: GeOverlapPolicy = Field(default_factory=GeOverlapPolicy)
+    warnings: list[str] = Field(default_factory=list)
