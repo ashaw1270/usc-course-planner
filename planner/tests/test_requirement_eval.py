@@ -23,9 +23,11 @@ from app.models import (
 from app.scraper import parse_general_education_html, parse_program_html
 from planner.requirement_eval import (
     build_taken_set,
+    collect_known_course_ids,
     evaluate_general_education,
     evaluate_program,
     normalize_course_id,
+    partition_taken_for_evaluation,
 )
 
 
@@ -58,6 +60,25 @@ def test_normalize_course_id_variants():
 def test_build_taken_set_dedupes():
     s = build_taken_set(["CSCI 103L", "csci103l", ""])
     assert s == frozenset({"CSCI 103L"})
+
+
+def test_partition_taken_for_evaluation_checks_known_courses():
+    prog = _minimal_program(
+        blocks=[
+            RequirementBlock(
+                id="core",
+                title="Core",
+                root=AllOfNode(children=[CourseNode(course_id="MATH 125"), CourseNode(course_id="CSCI 102L")]),
+            )
+        ]
+    )
+    known = collect_known_course_ids(prog, ge_catalog=None)
+    good, bad = partition_taken_for_evaluation(
+        ["MATH 125", "MATH 18273", "CSCI 102L", "math 125"],
+        known,
+    )
+    assert good == ["MATH 125", "CSCI 102L"]
+    assert bad == ["MATH 18273"]
 
 
 def _minimal_program(**kwargs) -> Program:
@@ -337,10 +358,16 @@ async def test_post_programs_evaluate(monkeypatch, sample_html, sample_ge_html):
     async def mock_get_ge(catoid: int, poid: int, force_refresh: bool = False):
         return parse_general_education_html(sample_ge_html, catoid, poid)
 
+    class StubCourseLookup:
+        async def course_exists(self, term_code: int, course_id: str, *, force_refresh: bool = False) -> bool:
+            assert term_code == 20253
+            return course_id != "MATH 18273"
+
     import app.main as main_module
 
     monkeypatch.setattr(main_module, "fetch_program", mock_fetch)
     monkeypatch.setattr(main_module, "_get_ge_catalog", mock_get_ge)
+    monkeypatch.setattr(main_module, "get_course_existence_service", lambda: StubCourseLookup())
 
     async with AsyncClient(
         transport=ASGITransport(app=app),
@@ -348,7 +375,7 @@ async def test_post_programs_evaluate(monkeypatch, sample_html, sample_ge_html):
     ) as client:
         r = await client.post(
             "/programs/evaluate?catoid=99&poid=1001",
-            json={"taken": ["WRIT 150", "CSCI 102L"]},
+            json={"taken": ["WRIT 150", "CSCI 102L", "MATH 18273"]},
         )
     assert r.status_code == 200
     data = r.json()
@@ -356,3 +383,30 @@ async def test_post_programs_evaluate(monkeypatch, sample_html, sample_ge_html):
     assert any(b["title"] for b in data["blocks"])
     assert len(data["general_education"]) == 8
     assert data["ge_error"] is None
+    assert data["unrecognized_courses"] == ["MATH 18273"]
+
+
+@pytest.mark.asyncio
+async def test_get_course_exists_endpoint(monkeypatch):
+    class StubCourseLookup:
+        async def course_exists(self, term_code: int, course_id: str, *, force_refresh: bool = False) -> bool:
+            assert term_code == 20263
+            return course_id == "CSCI 102L"
+
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "get_course_existence_service", lambda: StubCourseLookup())
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        ok = await client.get("/courses/exists?term_code=20263&course_id=csci102l")
+        bad = await client.get("/courses/exists?term_code=20263&course_id=MATH+18273")
+
+    assert ok.status_code == 200
+    assert ok.json()["exists"] is True
+    assert ok.json()["normalized_course_id"] == "CSCI 102L"
+    assert ok.json()["term_code"] == 20263
+    assert bad.status_code == 200
+    assert bad.json()["exists"] is False

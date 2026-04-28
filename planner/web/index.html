@@ -291,8 +291,17 @@
           throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail) || r.statusText);
         }
         const data = await r.json();
-        $("program-meta").innerHTML =
-          `<strong>${escapeHtml(data.title)}</strong><br><span style="color:#555">Catalog: ${escapeHtml(data.catalog_year || "")}</span>`;
+        const displayTitle = (data.title || "").trim() || "Program";
+        const invalid = Array.isArray(data.unrecognized_courses) ? data.unrecognized_courses : [];
+        let metaHtml =
+          `<strong>${escapeHtml(displayTitle)}</strong><br><span style="color:#555">Catalog: ${escapeHtml(data.catalog_year || "")}</span>`;
+        if (invalid.length) {
+          metaHtml += "<br>";
+          metaHtml += invalid
+            .map((cid) => `<span style="color:#991b1b">Invalid course code: <code>${escapeHtml(cid)}</code></span>`)
+            .join("<br>");
+        }
+        $("program-meta").innerHTML = metaHtml;
 
         let html = "";
         if (data.program_warnings && data.program_warnings.length) {

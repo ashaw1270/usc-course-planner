@@ -1,14 +1,22 @@
 """FastAPI application entrypoint."""
 from pathlib import Path
+import re
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from app.cache import get_cache, get_ge_cache
 from app.catalog_config import resolve_slug
+from app.course_lookup import get_course_existence_service
 from app.models import AnyOfNode, AllOfNode, CourseNode, GeneralEducationCatalog, Program, SelectNode
-from planner.requirement_eval import EvaluateBody, ProgramEvaluationResult, evaluate_program
+from planner.requirement_eval import (
+    EvaluateBody,
+    ProgramEvaluationResult,
+    evaluate_program,
+    normalize_course_id,
+)
 from app.scraper import fetch_general_education_catalog, fetch_program
 
 # GE listing used for planner /evaluate alongside the selected major program (USC catalogue IDs).
@@ -20,6 +28,22 @@ app = FastAPI(
     description="API for retrieving course requirements for USC majors and minors from catalogue.usc.edu",
     version="0.1.0",
 )
+
+
+class CourseExistenceResult(BaseModel):
+    course_id: str
+    normalized_course_id: str
+    exists: bool
+    term_code: int
+
+
+def _fall_term_code_from_catalog_year(catalog_year: str) -> int:
+    """Map 'YYYY-YYYY' catalog year to fall term code YYYY3."""
+    m = re.search(r"(\d{4})\s*-\s*(\d{4})", catalog_year or "")
+    if not m:
+        raise ValueError(f"Cannot derive term code from catalog year: {catalog_year!r}")
+    start_year = int(m.group(1))
+    return start_year * 10 + 3
 
 @app.get("/health")
 async def health():
@@ -94,11 +118,56 @@ async def post_evaluate_program(
     except httpx.RequestError as e:
         ge_error = f"General education catalog unavailable: {e!s}"
 
+    course_lookup = get_course_existence_service()
+    term_code = _fall_term_code_from_catalog_year(program.catalog_year)
+
+    recognized: list[str] = []
+    unrecognized: list[str] = []
+    seen: set[str] = set()
+    for raw in body.taken:
+        trimmed = raw.strip()
+        if not trimmed:
+            continue
+        normalized = normalize_course_id(trimmed)
+        if not normalized:
+            continue
+        exists = await course_lookup.course_exists(term_code, normalized, force_refresh=force_refresh)
+        if exists:
+            if normalized not in seen:
+                recognized.append(normalized)
+                seen.add(normalized)
+        else:
+            unrecognized.append(trimmed)
+
     return evaluate_program(
         program,
-        body.taken,
+        recognized,
         ge_catalog=ge_catalog,
         ge_error=ge_error,
+        unrecognized_courses=unrecognized,
+    )
+
+
+@app.get("/courses/exists", response_model=CourseExistenceResult)
+async def get_course_exists(
+    course_id: str = Query(..., description="Course id to check, e.g. CSCI 102L"),
+    term_code: int = Query(..., description="USC term code (e.g. 20263 for Fall 2026)"),
+    force_refresh: bool = Query(False, description="Bypass cache and re-check upstream"),
+):
+    """Return whether a course exists in USC classes API for a given term code."""
+    normalized = normalize_course_id(course_id)
+    if not normalized:
+        raise HTTPException(status_code=422, detail="course_id is required")
+    exists = await get_course_existence_service().course_exists(
+        term_code,
+        normalized,
+        force_refresh=force_refresh,
+    )
+    return CourseExistenceResult(
+        course_id=course_id,
+        normalized_course_id=normalized,
+        exists=exists,
+        term_code=term_code,
     )
 
 

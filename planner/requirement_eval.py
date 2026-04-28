@@ -55,6 +55,48 @@ def build_taken_set(taken: list[str]) -> frozenset[str]:
     return frozenset(normalize_course_id(x) for x in taken if normalize_course_id(x))
 
 
+def collect_known_course_ids(
+    program: Program,
+    ge_catalog: GeneralEducationCatalog | None = None,
+) -> frozenset[str]:
+    """Collect normalized course ids present in loaded USC catalogue data."""
+    known: set[str] = set()
+    for block in program.blocks:
+        for cn in _collect_courses(block.root):
+            cid = normalize_course_id(cn.course_id)
+            if cid:
+                known.add(cid)
+    if ge_catalog is not None:
+        for cat in ge_catalog.categories:
+            for entry in cat.courses:
+                cid = normalize_course_id(entry.course_id)
+                if cid:
+                    known.add(cid)
+    return frozenset(known)
+
+
+def partition_taken_for_evaluation(
+    taken: list[str],
+    known_courses: frozenset[str],
+) -> tuple[list[str], list[str]]:
+    """Return (recognized course ids, invalid input lines)."""
+    recognized: list[str] = []
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for raw in taken:
+        trimmed = raw.strip()
+        if not trimmed:
+            continue
+        normalized = normalize_course_id(trimmed)
+        if normalized in known_courses:
+            if normalized not in seen:
+                recognized.append(normalized)
+                seen.add(normalized)
+        else:
+            invalid.append(trimmed)
+    return recognized, invalid
+
+
 class NodeEval(BaseModel):
     """Internal result for one requirement node."""
 
@@ -273,6 +315,7 @@ class ProgramEvaluationResult(BaseModel):
     ge_catalog_year: str = ""
     ge_warnings: list[str] = Field(default_factory=list)
     ge_error: str | None = None
+    unrecognized_courses: list[str] = Field(default_factory=list)
 
 
 class EvaluateBody(BaseModel):
@@ -485,6 +528,7 @@ def evaluate_program(
     *,
     ge_catalog: GeneralEducationCatalog | None = None,
     ge_error: str | None = None,
+    unrecognized_courses: list[str] | None = None,
 ) -> ProgramEvaluationResult:
     taken_set = build_taken_set(taken)
     available = set(taken_set)
@@ -543,4 +587,5 @@ def evaluate_program(
         ge_catalog_year=ge_year,
         ge_warnings=ge_warnings,
         ge_error=ge_error,
+        unrecognized_courses=list(unrecognized_courses or []),
     )
